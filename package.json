@@ -1,0 +1,14 @@
+{
+  "name": "adaptive-lp-guard-hook",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "mocha --timeout 10000 \"test/**/*.test.js\"",
+    "demo": "node scripts/demo.js"
+  },
+  "devDependencies": {
+    "chai": "^4.5.0",
+    "mocha": "^11.7.5",
+    "solc": "^0.8.31"
+  }
+}
