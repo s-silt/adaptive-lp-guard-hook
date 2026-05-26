@@ -1,50 +1,83 @@
-const config = {
-  baseFeeBps: 30,
+const { ethers } = require("hardhat");
+
+const baseConfig = {
   minFeeBps: 5,
+  baseFeeBps: 30,
   maxFeeBps: 300,
   volatilityThresholdTicks: 50,
-  imbalanceThresholdBps: 1_500
+  volatilityFeeBps: 50,
+  volatilitySlopeDivisor: 3,
+  largeSwapThreshold: 1000,
+  imbalanceThreshold: 1500,
+  pressureFeeBps: 50,
+  cooldownFeeBps: 25,
+  cooldownTriggerMultiplier: 4,
+  cooldownBlocks: 3,
 };
 
-function decide(label, referenceTick, currentTick, amountSpecified, imbalanceScoreBps, pressureDirection, cooldownActive) {
-  const deviation = Math.abs(referenceTick - currentTick);
-  let fee = config.baseFeeBps;
-  let reasonFlags = 0;
-  let regime = "calm";
+const REGIME_LABEL = { 0: "calm", 1: "volatile" };
 
-  if (deviation >= config.volatilityThresholdTicks) {
-    fee += 50 + Math.floor((deviation - config.volatilityThresholdTicks) / 3);
-    reasonFlags |= 1;
-    regime = "volatile";
-  }
-
-  if (pressureDirection !== 0 && amountSpecified >= 1_000 && imbalanceScoreBps >= config.imbalanceThresholdBps) {
-    fee += 50;
-    reasonFlags |= 2;
-  }
-
-  if (cooldownActive) {
-    fee += 25;
-    reasonFlags |= 4;
-  }
-
-  if (fee > config.maxFeeBps) {
-    fee = config.maxFeeBps;
-    reasonFlags |= 8;
-  }
-
-  return { label, feeBps: fee, regime, volatilityTicks: deviation, imbalanceScoreBps, reasonFlags };
-}
-
-const scenarios = [
-  decide("calm swap", 1000, 1010, 300, 0, 0, false),
-  decide("volatile swap", 1000, 1125, 300, 0, 0, false),
-  decide("large same-direction pressure", 1000, 1010, 2_000, 2_500, 1, false),
-  decide("cooldown protected swap", 1000, 1010, 300, 0, 0, true)
-];
-
-for (const scenario of scenarios) {
-  console.log(
-    `${scenario.label}: fee=${scenario.feeBps}bps regime=${scenario.regime} volatilityTicks=${scenario.volatilityTicks} imbalance=${scenario.imbalanceScoreBps} flags=${scenario.reasonFlags}`
+function format(label, d) {
+  return (
+    `${label}: fee=${d.feeBps}bps ` +
+    `regime=${REGIME_LABEL[Number(d.regime)]} ` +
+    `volatilityTicks=${d.volatilityScore} ` +
+    `imbalance=${d.imbalanceScore} flags=${d.reasonFlags}`
   );
 }
+
+async function main() {
+  const [, poolManager] = await ethers.getSigners();
+
+  const Hook = await ethers.getContractFactory("AdaptiveFeeHook");
+  const hook = await Hook.deploy(poolManager.address);
+  await hook.waitForDeployment();
+
+  const poolId = ethers.keccak256(ethers.toUtf8Bytes("demo-pool"));
+  await (await hook.configurePool(poolId, baseConfig)).wait();
+
+  const hookAsManager = hook.connect(poolManager);
+
+  const scenarios = [
+    { label: "calm swap", ref: 1000, cur: 1010, amount: 300, imbalance: 0, dir: 0 },
+    { label: "volatile swap", ref: 1000, cur: 1125, amount: 300, imbalance: 0, dir: 0 },
+    {
+      label: "same-direction pressure",
+      ref: 1000,
+      cur: 1010,
+      amount: 2000,
+      imbalance: 2500,
+      dir: 1,
+    },
+  ];
+
+  for (const s of scenarios) {
+    const d = await hookAsManager.beforeSwapDecision.staticCall(
+      poolId,
+      s.ref,
+      s.cur,
+      s.amount,
+      s.imbalance,
+      s.dir
+    );
+    console.log(format(s.label, d));
+  }
+
+  // Trigger cooldown with an extreme deviation, then show a follow-up swap is
+  // charged the cooldown surcharge.
+  await (await hookAsManager.beforeSwapDecision(poolId, 0, 1000, 300, 0, 0)).wait();
+  const protected_ = await hookAsManager.beforeSwapDecision.staticCall(
+    poolId,
+    1000,
+    1010,
+    300,
+    0,
+    0
+  );
+  console.log(format("cooldown protected swap", protected_));
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

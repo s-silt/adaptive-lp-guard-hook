@@ -11,11 +11,17 @@ library AdaptiveFeeMath {
     uint16 internal constant FLAG_CLAMPED_MAX = 8;
 
     struct Config {
-        uint16 baseFeeBps;
         uint16 minFeeBps;
+        uint16 baseFeeBps;
         uint16 maxFeeBps;
         uint24 volatilityThresholdTicks;
-        uint16 imbalanceThresholdBps;
+        uint16 volatilityFeeBps;
+        uint24 volatilitySlopeDivisor;
+        uint256 largeSwapThreshold;
+        uint256 imbalanceThreshold;
+        uint16 pressureFeeBps;
+        uint16 cooldownFeeBps;
+        uint16 cooldownTriggerMultiplier;
         uint32 cooldownBlocks;
     }
 
@@ -24,7 +30,7 @@ library AdaptiveFeeMath {
         uint16 reasonFlags;
         uint8 regime;
         uint24 volatilityScore;
-        uint16 imbalanceScoreBps;
+        uint256 imbalanceScore;
         bool enterCooldown;
     }
 
@@ -32,37 +38,46 @@ library AdaptiveFeeMath {
         Config memory config,
         int24 referenceTick,
         int24 currentTick,
-        uint256 amountSpecified,
-        uint16 imbalanceScoreBps,
+        int256 amountSpecified,
+        int256 imbalance,
         int8 pressureDirection,
         bool cooldownActive
     ) internal pure returns (Decision memory decision) {
         uint24 deviation = _absTickDiff(referenceTick, currentTick);
-        uint256 fee = config.baseFeeBps;
+        uint256 absAmount = _abs256(amountSpecified);
+        uint256 absImbalance = _abs256(imbalance);
+
         decision.volatilityScore = deviation;
-        decision.imbalanceScoreBps = imbalanceScoreBps;
+        decision.imbalanceScore = absImbalance;
+
+        uint256 fee = config.baseFeeBps;
 
         if (deviation >= config.volatilityThresholdTicks) {
-            uint256 overThreshold = deviation - config.volatilityThresholdTicks;
-            uint256 volatilitySurcharge = 50 + (overThreshold / 3);
-            fee += volatilitySurcharge;
+            uint256 overThreshold = uint256(deviation) - uint256(config.volatilityThresholdTicks);
+            uint256 surcharge = uint256(config.volatilityFeeBps)
+                + (overThreshold / uint256(config.volatilitySlopeDivisor));
+            fee += surcharge;
             decision.reasonFlags |= FLAG_VOLATILITY;
             decision.regime = REGIME_VOLATILE;
         } else {
             decision.regime = REGIME_CALM;
         }
 
+        bool sameDirectionPressure =
+            (imbalance > 0 && pressureDirection > 0) ||
+            (imbalance < 0 && pressureDirection < 0);
+
         if (
-            pressureDirection != 0
-                && amountSpecified >= 1_000
-                && imbalanceScoreBps >= config.imbalanceThresholdBps
+            sameDirectionPressure
+                && absAmount >= config.largeSwapThreshold
+                && absImbalance >= config.imbalanceThreshold
         ) {
-            fee += 50;
+            fee += config.pressureFeeBps;
             decision.reasonFlags |= FLAG_IMBALANCE;
         }
 
         if (cooldownActive) {
-            fee += 25;
+            fee += config.cooldownFeeBps;
             decision.reasonFlags |= FLAG_COOLDOWN;
         }
 
@@ -76,7 +91,10 @@ library AdaptiveFeeMath {
         }
 
         decision.feeBps = uint16(fee);
-        decision.enterCooldown = deviation >= uint256(config.volatilityThresholdTicks) * 4;
+
+        uint256 cooldownTrigger = uint256(config.volatilityThresholdTicks)
+            * uint256(config.cooldownTriggerMultiplier);
+        decision.enterCooldown = cooldownTrigger > 0 && uint256(deviation) >= cooldownTrigger;
     }
 
     function validate(Config memory config) internal pure {
@@ -84,7 +102,7 @@ library AdaptiveFeeMath {
         require(config.baseFeeBps <= config.maxFeeBps, "base above max");
         require(config.maxFeeBps <= 10_000, "fee above 100%");
         require(config.volatilityThresholdTicks > 0, "zero volatility threshold");
-        require(config.imbalanceThresholdBps <= 10_000, "bad imbalance threshold");
+        require(config.volatilitySlopeDivisor > 0, "zero slope divisor");
     }
 
     function _absTickDiff(int24 a, int24 b) private pure returns (uint24) {
@@ -93,5 +111,9 @@ library AdaptiveFeeMath {
             diff = -diff;
         }
         return uint24(uint256(diff));
+    }
+
+    function _abs256(int256 x) private pure returns (uint256) {
+        return x < 0 ? uint256(-x) : uint256(x);
     }
 }
