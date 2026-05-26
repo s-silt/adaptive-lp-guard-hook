@@ -4,7 +4,7 @@ dist/
 artifacts/
 cache/
 build/
+typechain-types/
 .env
 .DS_Store
 .claude/
-

@@ -6,16 +6,16 @@ Built for the **OKX X Layer Build-X Hackathon (Hook track)**, in collaboration w
 
 ## What ships in this repo
 
-Two parallel implementations live side-by-side:
+Two implementations live side-by-side:
 
-| Path | Status | Purpose |
-|---|---|---|
-| `contracts/AdaptiveFeeHook.sol` + `contracts/AdaptiveFeeMath.sol` | Submitted MVP | Standalone fee-decision engine with a v4-style API surface, kept unmodified to match the submitted artifact. Useful as a self-contained simulator. |
-| `contracts/v4/AdaptiveFeeHookV4.sol` + `contracts/v4/AdaptiveFeeMathV4.sol` | **New, post-submission** | Real `IHooks` implementation that PoolManager will dispatch on `beforeSwap`/`afterInitialize`. Plugs into a v4 dynamic-fee pool and overrides the LP fee per swap. |
+| Path | Purpose |
+|---|---|
+| `contracts/AdaptiveFeeHook.sol` + `contracts/AdaptiveFeeMath.sol` | Hardened MVP — standalone fee-decision engine with a v4-style API surface. Adds `onlyOwner` / `onlyPoolAdmin` / `onlyPoolManager` gating, per-pool parameterisation, and real Hardhat-based Solidity tests (`test/adaptiveFeeHook.test.js`, `test/adaptiveFeeMath.test.js`). Adapter-friendly: a deployment can wire its `beforeSwapDecision` behind a v4 `beforeSwap` hook surface and pass the PoolManager address at construction. |
+| `contracts/v4/AdaptiveFeeHookV4.sol` + `contracts/v4/AdaptiveFeeMathV4.sol` | Real `IHooks` implementation. Inherits `BaseHook` directly, mined CREATE2 hook address with the right permission bits, dispatched by the v4 PoolManager on `beforeSwap` and `afterInitialize`. Returns a per-swap LP fee through the `OVERRIDE_FEE_FLAG` mechanism — i.e. uses the v4 dynamic-fee path end-to-end. Already deployed to X Layer testnet (see below). |
 
-The hackathon rules allow continued development on submitted projects, including new Hook contract logic — that is what the `contracts/v4/` tree is.
+The hackathon rules allow continued development on submitted projects, including new Hook contract logic — both trees above are the result of that follow-on work.
 
-## The hook in one diagram
+## The hook in one diagram (V4 path)
 
 ```
 Trader ──► PoolSwapTest.swap(poolKey, ...)
@@ -41,7 +41,7 @@ The pool MUST be created with `PoolKey.fee = LPFeeLibrary.DYNAMIC_FEE_FLAG` (`0x
 
 ## Fee model
 
-`AdaptiveFeeMathV4.decide` is a pure function. Every coefficient that shapes the response curve is per-pool configurable:
+`AdaptiveFeeMathV4.decide` (and the analogous `AdaptiveFeeMath.decide` in the MVP tree) is a pure function. Every coefficient that shapes the response curve is per-pool configurable:
 
 ```
 fee = baseFeeBps
@@ -57,10 +57,18 @@ clamp(fee, [minFeeBps, maxFeeBps])
 enterCooldown ⇔ deviation ≥ volatilityThresholdTicks · cooldownTriggerMultiplier
 ```
 
+Reason flags emitted on each decision:
+
+- `1` — volatility surcharge applied
+- `2` — imbalance / pressure surcharge applied
+- `4` — cooldown surcharge applied
+- `8` — fee was clamped to `maxFeeBps`
+- `16` — fee was clamped to `minFeeBps`
+
 Why this is more than "fee = f(volatility)":
 
 - **Imbalance branch** taxes large one-sided pressure separately from volatility, so a sudden whale swap pays even when the tick has barely moved yet.
-- **Cooldown branch** is sticky: once a single extreme move trips the circuit breaker, subsequent swaps in the protection window all pay the cooldown surcharge, regardless of their own size.
+- **Cooldown branch** is sticky: once a single extreme move trips the circuit breaker, subsequent swaps in the protection window all pay the cooldown surcharge.
 - **Reference tick** is anchored at pool initialization and can be re-anchored by the owner, so volatility is measured against a meaningful baseline rather than the previous block.
 
 Every decision emits `FeeDecisionRecorded(poolId, zeroForOne, amount, feeBps, reasonFlags, regime, volatilityScore, imbalanceScoreBps)` so judges (and graphs) can attribute each fee to the signals that produced it.
@@ -73,17 +81,21 @@ Other dynamic-fee hooks on v4 generally react to one signal (TWAP-vs-spot volati
 
 ```bash
 npm install
-npm run compile          # solc-js, resolves @uniswap/* imports from node_modules
-npm test                 # mocha — formula-level sanity checks (JS mirror)
+npm test                    # hardhat: real Solidity tests for the MVP tree
+npm run test:mirror         # mocha: JS-mirror sanity check for AdaptiveFeeMathV4
+npm run compile             # solc-js, compiles contracts/ + contracts/v4/ together
+npm run compile:hardhat     # hardhat compile (used on CI / Linux dev boxes)
 ```
 
-**Toolchain note.** The dev box for this project is Windows ARM64. Hardhat 2.x's napi-rs Solidity parser and Foundry both ship without `win32-arm64-msvc` prebuilt binaries, so the project uses `solc-js` directly for compilation and `ethers v6` for deployment. Local Anvil/Hardhat node is not available, so on-chain behaviour is verified by the deploy script against X Layer testnet rather than against a local fork. See `scripts/compile.js` for the import resolver and `scripts/deploy.js` for the end-to-end test.
+The MVP-tree tests under `test/adaptiveFeeHook.test.js` and `test/adaptiveFeeMath.test.js` deploy `AdaptiveFeeMathHarness` and `AdaptiveFeeHook` to the in-memory Hardhat network and assert directly against the compiled bytecode (no JS mirror), covering access-control paths (`onlyOwner`, `onlyPoolAdmin`, `onlyPoolManager`) and cooldown state transitions.
+
+**Toolchain note.** The primary dev box is Windows ARM64. Hardhat 2.x's napi-rs Solidity parser and Foundry both ship without `win32-arm64-msvc` prebuilt binaries, so the V4 path uses `solc-js` directly for compilation (`scripts/compile.js`) and `ethers v6` for deployment (`scripts/deploy.js`). On-chain behaviour for the V4 hook is verified by running the deploy script against X Layer testnet rather than a local fork. The Hardhat-driven tests for the MVP tree run unchanged on CI (`.github/workflows/test.yml`) where Linux binaries are available.
 
 ## Deploy to X Layer
 
 ```bash
 export DEPLOYER_PK=0x...           # funded with testnet OKB from https://www.okx.com/en-us/xlayer/faucet
-# Optional: override RPC if the default is rate-limited
+# Optional override if the default RPC is rate-limited:
 # export XLAYER_TESTNET_RPC=https://testrpc.xlayer.tech/terigon
 
 npm run compile
@@ -127,7 +139,7 @@ Deployed and exercised on **X Layer testnet** (chainId `1952`) on 2026-05-26. Fu
 | `AdaptiveFeeHookV4.configurePool` | [`0x732febe2…`](https://www.oklink.com/xlayer-test/tx/0x732febe269715f3f00933ec871e72fd5412c5ceb15ccf01222cdb3ad8db79a2a) |
 | `PoolManager.initialize` (afterInitialize fires) | [`0xd7f4de99…`](https://www.oklink.com/xlayer-test/tx/0xd7f4de997aa3ba55904b48ce374bafec1e16607686b11774812e4630178a8373) |
 | `modifyLiquidity` | [`0x1ad7030a…`](https://www.oklink.com/xlayer-test/tx/0x1ad7030a54ff7bc58d6c1a367ff6826e30b3b67e7f762ab00c5072694aaa66a4) |
-| Smoke swap #1 (calm,      base fee) | [`0x87068811…`](https://www.oklink.com/xlayer-test/tx/0x8706881112dd4d7cc021d2ad3200245215bd1b57749cb0384b9ee5974ed44439) |
+| Smoke swap #1 (calm, base fee) | [`0x87068811…`](https://www.oklink.com/xlayer-test/tx/0x8706881112dd4d7cc021d2ad3200245215bd1b57749cb0384b9ee5974ed44439) |
 | Smoke swap #2 (large swap, hook saw deviation pre-execution) | [`0x74689917…`](https://www.oklink.com/xlayer-test/tx/0x74689917f3f11eee106094323411095cbdcc39758b9da5a7190fab7565bcf3bd) |
 | Smoke swap #3 (deviation=199, **VOL branch**, fee=12966 bps) | [`0xb5c7a257…`](https://www.oklink.com/xlayer-test/tx/0xb5c7a25764b60c94baf04359fa2348173be50c7afa8a6b99b7a01da0e8f93ef3) |
 
@@ -151,7 +163,7 @@ extra #2   feeBps=10500   regime=calm      volScore=  0  imbScore= 2000   flags=
 
 How to read it:
 
-- **base** (no surcharge) — `calm` and `swap #2` both saw `deviation < threshold` *at entry*, so the hook returned `baseFeeBps = 3000`. (Swap #2 was a large swap that *moved* the tick a lot, but the hook evaluates state pre-execution; this is the intended design.)
+- **base** (no surcharge) — `calm` and `swap #2` both saw `deviation < threshold` *at entry*, so the hook returned `baseFeeBps = 3000`. (Swap #2 was a large swap that *moved* the tick a lot, but the hook evaluates state pre-execution; this is the intended design — see Security & trust model below.)
 - **VOL** — `swap #3` and `extra #1` saw `deviation ≥ 50`. For `extra #1` deviation = 296, surcharge = `5000 + ⌊(296 − 50) × 100 / 3⌋ = 13200`, total fee = `3000 + 13200 = 16200 bps = 1.62%`. ✅
 - **CD** — `extra #1` had `deviation ≥ 4 × 50 = 200`, so it called `cooldownUntilBlock[pid] = block + 5`. Two blocks later, `extra #2` saw `cooldownActive = true` and added `cooldownSurchargeBps = 2500`.
 - **IMB** — `extra #2`'s `amountSpecified ≈ 2e20` against ~1e21 of liquidity gives `imbScore = 2000 ≥ imbalanceThresholdBps = 1500`, adding `imbalanceSurchargeBps = 5000`. Total: `3000 (base) + 5000 (IMB) + 2500 (CD) = 10500 bps = 1.05%`. ✅
@@ -160,31 +172,37 @@ This is the full evidence trail for the four reason-flag branches the hook can t
 
 ## Security & trust model
 
-- `configurePool` and `resetReferenceTick` are `onlyOwner` (set to the deployer in the constructor). External callers cannot push the hook into cooldown or rewrite the fee curve.
-- All swap-time inputs come from `PoolManager` callbacks (the `onlyPoolManager` modifier inherited from `BaseHook` rejects spoofed calls), so the imbalance score and current tick reflect actual pool state, not user-supplied numbers.
+- `configurePool` and `resetReferenceTick` on `AdaptiveFeeHookV4` are `onlyOwner` (set explicitly via constructor parameter, so the wallet that triggered the CREATE2 deploy ends up as owner — not the CREATE2 proxy). The MVP tree adds `onlyPoolAdmin` for per-pool config delegation and `onlyPoolManager` to gate the swap callback. External callers cannot push the hook into cooldown or rewrite the fee curve.
+- All swap-time inputs to `AdaptiveFeeHookV4` come from `PoolManager` callbacks (the `onlyPoolManager` modifier inherited from `BaseHook` rejects spoofed calls), so the imbalance score and current tick reflect actual pool state, not user-supplied numbers.
 - The hook does **not** take `BeforeSwapDelta` and does **not** rebalance the swap itself — it only mutates the LP fee. This keeps the audit surface narrow and the user's swap outcome identical to a vanilla pool aside from the fee.
 - Fees are clamped to `[minFeeBps, maxFeeBps]`. Even a misconfigured curve cannot exceed the configured ceiling.
+- **State is evaluated pre-execution.** The fee a swap pays reflects pool state *as the swap enters*, not its execution outcome. Two consequences: (a) traders can predict their fee exactly from pre-trade state, which is MEV-resistant (a bot can't simultaneously cause volatility *and* dodge the surcharge in one tx); and (b) cooldown protection appears one swap later than the swap that triggered it.
 
 ## Repository map
 
 ```
 contracts/
-├─ AdaptiveFeeHook.sol         (submitted MVP, unchanged)
-├─ AdaptiveFeeMath.sol         (submitted MVP, unchanged)
+├─ AdaptiveFeeHook.sol         (hardened MVP — onlyOwner/onlyPoolAdmin gating, parameterised)
+├─ AdaptiveFeeMath.sol         (hardened MVP — pure fee math, parameterised)
+├─ test/AdaptiveFeeMathHarness.sol  (test-only wrapper for exercising the lib under Hardhat)
 └─ v4/
-   ├─ AdaptiveFeeHookV4.sol    (real IHooks implementation)
-   ├─ AdaptiveFeeMathV4.sol    (parameterised fee math)
+   ├─ AdaptiveFeeHookV4.sol    (real IHooks implementation, BaseHook-derived)
+   ├─ AdaptiveFeeMathV4.sol    (parameterised fee math, V4 path)
    ├─ Create2Deployer.sol      (minimal CREATE2 deployer for hook-address mining)
    └─ Imports.sol              (forces solc to compile v4-core PoolManager + test routers)
 scripts/
 ├─ compile.js                  (solc-js compiler with node_modules import resolution)
 ├─ hookMiner.js                (CREATE2 salt search — JS port of Foundry HookMiner)
 ├─ mine.js                     (self-test for hookMiner)
-├─ deploy.js                   (end-to-end deployment + smoke-swap script)
-└─ demo.js                     (legacy MVP demo, kept for parity with submitted version)
+├─ deploy.js                   (end-to-end deployment + smoke-swap script, V4 path)
+├─ extra-swaps.js              (follow-up swaps to drive every fee branch on chain)
+└─ demo.js                     (Hardhat-driven MVP demo)
 test/
-├─ adaptiveFeeHook.test.js     (legacy submitted-version tests)
-└─ adaptiveFeeMathV4.test.js   (JS mirror tests for the new parameterised math)
+├─ adaptiveFeeHook.test.js     (Hardhat tests for the MVP hook — access control, cooldown)
+├─ adaptiveFeeMath.test.js     (Hardhat tests for the MVP fee math)
+└─ adaptiveFeeMathV4.test.js   (mocha JS-mirror tests for the V4 fee math)
+.github/workflows/             (CI: hardhat compile + test on push/PR)
+deployments/                   (deployment reports per chain — kept in repo as evidence)
 docs/superpowers/              (planning + design docs from the submitted MVP)
 ```
 
