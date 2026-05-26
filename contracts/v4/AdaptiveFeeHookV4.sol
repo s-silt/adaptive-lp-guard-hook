@@ -41,7 +41,6 @@ contract AdaptiveFeeHookV4 is BaseHook {
         uint24 volatilityScore,
         uint16 imbalanceScoreBps
     );
-    event CooldownTriggered(PoolId indexed poolId, uint256 untilBlock);
     event OwnerTransferStarted(address indexed from, address indexed to);
     event OwnerTransferred(address indexed from, address indexed to);
     event Paused(address indexed by);
@@ -173,10 +172,6 @@ contract AdaptiveFeeHookV4 is BaseHook {
             );
         }
 
-        // Cache storage reads.
-        int24 refTick = referenceTick[pid];
-        uint256 cooldownUntil = cooldownUntilBlock[pid];
-
         (, int24 currentTick,,) = poolManager.getSlot0(pid);
         uint128 liquidity = poolManager.getLiquidity(pid);
 
@@ -188,21 +183,16 @@ contract AdaptiveFeeHookV4 is BaseHook {
 
         AdaptiveFeeMathV4.Decision memory decision = AdaptiveFeeMathV4.decide(
             config,
-            refTick,
+            referenceTick[pid],
             currentTick,
             absAmount,
             imbalanceScoreBps,
             pressureDir,
-            block.number < cooldownUntil
+            block.number <= cooldownUntilBlock[pid]
         );
 
         if (decision.enterCooldown && config.cooldownBlocks > 0) {
-            // cooldownUntilBlock is exclusive: cooldown is active for block numbers
-            // strictly less than this value. Adding +1 keeps cooldownBlocks=N meaning
-            // "N blocks of protection after this swap".
-            uint256 newUntil = block.number + uint256(config.cooldownBlocks) + 1;
-            cooldownUntilBlock[pid] = newUntil;
-            emit CooldownTriggered(pid, newUntil);
+            cooldownUntilBlock[pid] = block.number + config.cooldownBlocks;
         }
 
         emit FeeDecisionRecorded(
