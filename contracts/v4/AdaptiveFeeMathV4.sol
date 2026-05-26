@@ -103,7 +103,9 @@ library AdaptiveFeeMathV4 {
         require(config.baseFeeBps <= config.maxFeeBps, "base above max");
         require(config.maxFeeBps <= 1_000_000, "fee above 100%");
         require(config.volatilityThresholdTicks > 0, "zero volatility threshold");
+        require(config.volatilitySurchargeScale > 0, "zero volatility scale");
         require(config.imbalanceThresholdBps <= 10_000, "bad imbalance threshold");
+        require(config.imbalanceMinAmount <= type(uint128).max, "imbalance min too high");
         require(config.cooldownTriggerMultiplier > 0, "zero cooldown multiplier");
     }
 

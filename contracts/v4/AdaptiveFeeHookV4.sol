@@ -23,6 +23,7 @@ contract AdaptiveFeeHookV4 is BaseHook {
 
     address public owner;
     address public pendingOwner;
+    bool public paused;
 
     mapping(PoolId poolId => AdaptiveFeeMathV4.Config config) private _configs;
     mapping(PoolId poolId => int24 tick) public referenceTick;
@@ -40,12 +41,16 @@ contract AdaptiveFeeHookV4 is BaseHook {
         uint24 volatilityScore,
         uint16 imbalanceScoreBps
     );
+    event CooldownTriggered(PoolId indexed poolId, uint256 untilBlock);
     event OwnerTransferStarted(address indexed from, address indexed to);
     event OwnerTransferred(address indexed from, address indexed to);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
 
     error NotOwner();
     error NotPendingOwner();
     error PoolNotConfigured();
+    error ZeroOwner();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -57,8 +62,22 @@ contract AdaptiveFeeHookV4 is BaseHook {
     ///                 Passed explicitly because hooks are typically deployed via a
     ///                 CREATE2 proxy and msg.sender during construction is the proxy.
     constructor(IPoolManager _manager, address _owner) BaseHook(_manager) {
+        if (_owner == address(0)) revert ZeroOwner();
         owner = _owner;
         emit OwnerTransferred(address(0), _owner);
+    }
+
+    /// @notice Stop the adaptive surcharges. Swaps still go through but the hook
+    ///         returns the configured baseFeeBps with no add-ons. Useful as a kill
+    ///         switch if oracle / liquidity reads ever produce nonsense values.
+    function emergencyPause() external onlyOwner {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     /// @notice Begin a two-step ownership handover. The new owner must call
@@ -145,6 +164,19 @@ contract AdaptiveFeeHookV4 is BaseHook {
         AdaptiveFeeMathV4.Config memory config = _configs[pid];
         if (config.maxFeeBps == 0) revert PoolNotConfigured();
 
+        // Pause path: skip all adaptive logic, return baseFee with override flag.
+        if (paused) {
+            return (
+                BaseHook.beforeSwap.selector,
+                BeforeSwapDeltaLibrary.ZERO_DELTA,
+                uint24(config.baseFeeBps) | LPFeeLibrary.OVERRIDE_FEE_FLAG
+            );
+        }
+
+        // Cache storage reads.
+        int24 refTick = referenceTick[pid];
+        uint256 cooldownUntil = cooldownUntilBlock[pid];
+
         (, int24 currentTick,,) = poolManager.getSlot0(pid);
         uint128 liquidity = poolManager.getLiquidity(pid);
 
@@ -156,16 +188,21 @@ contract AdaptiveFeeHookV4 is BaseHook {
 
         AdaptiveFeeMathV4.Decision memory decision = AdaptiveFeeMathV4.decide(
             config,
-            referenceTick[pid],
+            refTick,
             currentTick,
             absAmount,
             imbalanceScoreBps,
             pressureDir,
-            block.number <= cooldownUntilBlock[pid]
+            block.number < cooldownUntil
         );
 
         if (decision.enterCooldown && config.cooldownBlocks > 0) {
-            cooldownUntilBlock[pid] = block.number + config.cooldownBlocks;
+            // cooldownUntilBlock is exclusive: cooldown is active for block numbers
+            // strictly less than this value. Adding +1 keeps cooldownBlocks=N meaning
+            // "N blocks of protection after this swap".
+            uint256 newUntil = block.number + uint256(config.cooldownBlocks) + 1;
+            cooldownUntilBlock[pid] = newUntil;
+            emit CooldownTriggered(pid, newUntil);
         }
 
         emit FeeDecisionRecorded(
