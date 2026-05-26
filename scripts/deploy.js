@@ -16,6 +16,11 @@
  * Optional:
  *   CHAIN_LABEL   — short label to print in the report header (default: "unknown")
  *   OUT_FILE      — where to write the deployment report JSON (default: deployments/<chain>.json)
+ *   NEW_OWNER_PK  — if set, after the smoke swaps the deployer calls transferOwner()
+ *                   on the hook with this wallet's address; then the wallet itself
+ *                   calls acceptOwner() — proving the two-step ownership handover on
+ *                   chain. The new owner needs a small OKB balance to pay acceptOwner gas;
+ *                   if its balance is zero, the deployer auto-funds it with 0.02 OKB.
  *
  * Run: node scripts/deploy.js
  */
@@ -191,6 +196,9 @@ async function main() {
     await (await t.approve(await liqRouter.getAddress(), MAX_UINT)).wait();
     await (await t.approve(await swapRouter.getAddress(), MAX_UINT)).wait();
   }
+  // X Layer testnet RPC can lag a couple of seconds behind tx finality, which makes
+  // estimateGas read stale allowance state. Give it a moment.
+  await new Promise((r) => setTimeout(r, 5000));
 
   const liqParams = {
     tickLower: -TICK_SPACING * 10,
@@ -198,7 +206,7 @@ async function main() {
     liquidityDelta: LIQUIDITY,
     salt: ethers.ZeroHash
   };
-  const liqTx = await liqRouter.modifyLiquidity(poolKey, liqParams, "0x");
+  const liqTx = await liqRouter.modifyLiquidity(poolKey, liqParams, "0x", { gasLimit: 3_000_000 });
   await liqTx.wait();
   console.log(`  modifyLiquidity tx: ${liqTx.hash}`);
 
@@ -218,10 +226,64 @@ async function main() {
       amountSpecified: s.amount,
       sqrtPriceLimitX96: s.zeroForOne ? "4295128740" : "1461446703485210103287273052203988822378723970341"
     };
-    const swapTx = await swapRouter.swap(poolKey, params, swapSettings, "0x");
+    const swapTx = await swapRouter.swap(poolKey, params, swapSettings, "0x", { gasLimit: 3_000_000 });
     const swapRcpt = await swapTx.wait();
     console.log(`  ${s.label.padEnd(10)} tx: ${swapRcpt.hash}`);
     txs.push({ label: s.label, hash: swapRcpt.hash });
+  }
+
+  // Optional: hand the hook over to a fresh wallet via the two-step transferOwner / acceptOwner flow
+  let ownershipHandover = null;
+  if (process.env.NEW_OWNER_PK) {
+    console.log("\n[9/9] Transferring hook ownership to a fresh wallet...");
+    const newOwnerWallet = new ethers.Wallet(process.env.NEW_OWNER_PK, provider);
+    const newOwnerAddr = newOwnerWallet.address;
+    console.log("  new owner:", newOwnerAddr);
+
+    // Make sure the new owner can pay acceptOwner gas.
+    const newOwnerBal = await provider.getBalance(newOwnerAddr);
+    let fundTxHash = null;
+    if (newOwnerBal === 0n) {
+      console.log("  funding new owner with 0.02 OKB for acceptOwner gas...");
+      const fundTx = await wallet.sendTransaction({
+        to: newOwnerAddr,
+        value: ethers.parseEther("0.02")
+      });
+      const fundRcpt = await fundTx.wait();
+      fundTxHash = fundRcpt.hash;
+      console.log("  fund tx:", fundTxHash);
+    } else {
+      console.log("  new owner already has", ethers.formatEther(newOwnerBal), "OKB; skipping fund step");
+    }
+
+    const transferTx = await hook.transferOwner(newOwnerAddr);
+    const transferRcpt = await transferTx.wait();
+    console.log("  transferOwner tx:", transferRcpt.hash);
+
+    const hookFromNewOwner = new ethers.Contract(mined.address, hookAbi, newOwnerWallet);
+    const acceptTx = await hookFromNewOwner.acceptOwner();
+    const acceptRcpt = await acceptTx.wait();
+    console.log("  acceptOwner tx:  ", acceptRcpt.hash);
+
+    // X Layer testnet RPC sometimes lags behind tx finality, so retry the read briefly.
+    let finalOwner;
+    for (let i = 0; i < 20; i++) {
+      finalOwner = await hook.owner();
+      if (finalOwner.toLowerCase() === newOwnerAddr.toLowerCase()) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (finalOwner.toLowerCase() !== newOwnerAddr.toLowerCase()) {
+      throw new Error(`Ownership handover failed: hook.owner() = ${finalOwner}, expected ${newOwnerAddr} (after 30s)`);
+    }
+    console.log("  hook.owner() now:", finalOwner, "✅");
+
+    ownershipHandover = {
+      previousOwner: wallet.address,
+      newOwner: newOwnerAddr,
+      fundTx: fundTxHash,
+      transferOwnerTx: transferRcpt.hash,
+      acceptOwnerTx: acceptRcpt.hash
+    };
   }
 
   // Write deployment report
@@ -243,6 +305,7 @@ async function main() {
     poolConfig: POOL_CONFIG,
     miner: { salt: mined.salt, attempts: mined.attempts },
     txs,
+    ownershipHandover,
     timestamp: new Date().toISOString()
   };
   fs.mkdirSync(path.dirname(OUT_FILE), { recursive: true });

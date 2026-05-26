@@ -1,0 +1,69 @@
+{
+  "chain": {
+    "label": "xlayer-testnet",
+    "chainId": 1952
+  },
+  "version": "v2",
+  "note": "Second deployment of the AdaptiveFeeHookV4 stack on X Layer testnet. Demonstrates the two-step transferOwner / acceptOwner handover added after v1: the deployer wallet 0x1BCd...0020 deployed everything and then handed hook ownership to a fresh wallet 0xFf94...b2be via transferOwner -> acceptOwner. Both transactions are recorded below.",
+  "deployer": "0x1BCd3a5169545b18a676A5EcA841C5d1db3b0020",
+  "contracts": {
+    "create2Deployer": "0x73B6E9b6F458F94A81384C49d2c7898b2C6b0d6a",
+    "poolManager": "0x215bd1b87726F1a238A41c2eB7e1D7907F02A1FF",
+    "tokenA": "0x525fa47a21A9Fac6D4c72beC8479E2662499a686",
+    "tokenB": "0xA408b3fBC0C7faeb4eC113D7E579c318F7f570a4",
+    "currency0": "0x525fa47a21A9Fac6D4c72beC8479E2662499a686",
+    "currency1": "0xA408b3fBC0C7faeb4eC113D7E579c318F7f570a4",
+    "swapRouter": "0x4313985923df86985CefB7A259be5A85a3578706",
+    "liquidityRouter": "0x3Fcb9bdf9A396560AF1C1d430306D874276E1aF6",
+    "adaptiveFeeHookV4": "0x6cdc6cB5F363f76a748891A41e0fF00C43A45080"
+  },
+  "poolKey": {
+    "currency0": "0x525fa47a21A9Fac6D4c72beC8479E2662499a686",
+    "currency1": "0xA408b3fBC0C7faeb4eC113D7E579c318F7f570a4",
+    "fee": "0x800000",
+    "tickSpacing": 60,
+    "hooks": "0x6cdc6cB5F363f76a748891A41e0fF00C43A45080"
+  },
+  "poolConfig": {
+    "baseFeeBps": 3000,
+    "minFeeBps": 500,
+    "maxFeeBps": 30000,
+    "volatilityThresholdTicks": 50,
+    "volatilitySurchargeBaseBps": 5000,
+    "volatilitySurchargeSlopeBps": 100,
+    "volatilitySurchargeScale": 3,
+    "imbalanceThresholdBps": 1500,
+    "imbalanceSurchargeBps": 5000,
+    "imbalanceMinAmount": 1000,
+    "cooldownTriggerMultiplier": 4,
+    "cooldownBlocks": 5,
+    "cooldownSurchargeBps": 2500
+  },
+  "miner": {
+    "salt": "0x0000000000000000000000000000000000000000000000000000000000004aef",
+    "attempts": 19184
+  },
+  "txs": [
+    { "label": "createHook",       "hash": "0x5fd9f1327f4d2592f876fb2658a6950c846d5defb5b1889d16b382cfb43016dc" },
+    { "label": "configurePool",    "hash": "0xc5d09737eb22138e38f1865e4a9111e2ab738b5694b272342501a59136e5b01b" },
+    { "label": "initialize",       "hash": "0x4390eba0598491e99985e7155c6754e1dde72aae144756079dd413f8c7eb46bc" },
+    { "label": "modifyLiquidity",  "hash": "0x95724d59959d7eb2a2570a83a058d3233fc18e8d15627937672df8ac957ae633" },
+    { "label": "calm",             "hash": "0x7fc3d37d763bed50dffab417dbdac508ce837333bdd997dcdc407d5459641073" },
+    { "label": "volatile",         "hash": "0x1060a7c50d079be61898ba78c5a79101a8b54b94fb1b672000b35651783dbd01" },
+    { "label": "imbalance",        "hash": "0xb8d45ec42b3230632578c76dd9e9428ae8f5be3f3ed40b1c1b81ff20af2a0ee6" }
+  ],
+  "ownershipHandover": {
+    "previousOwner": "0x1BCd3a5169545b18a676A5EcA841C5d1db3b0020",
+    "newOwner": "0xFf94b02BEDB61aEe1BAf90586085CDF55e59b2bE",
+    "fundTx":          "0xd51c5bfbcc4612348b2978442866a5cdc04771cd94ab43fdc0bc6b18963303e9",
+    "transferOwnerTx": "0x5dd197e0e7eba26ea15b1b36bb05376537d89a5cdce8d66c5708ffa61a5a02b7",
+    "acceptOwnerTx":   "0xfcc368759c547af104b7d8a7c42632936a40da73de7e78301100ee1d2760e769",
+    "verifiedOnChainOwner": "0xFf94b02BEDB61aEe1BAf90586085CDF55e59b2bE"
+  },
+  "feeDecisions": [
+    { "label": "calm",      "feeBps": 3000,  "regime": "calm",     "volScore":   0, "imbScore":    0, "flags": [] },
+    { "label": "volatile",  "feeBps": 3000,  "regime": "calm",     "volScore":   1, "imbScore":  100, "flags": [] },
+    { "label": "imbalance", "feeBps": 12966, "regime": "volatile", "volScore": 199, "imbScore":   50, "flags": ["VOL"] }
+  ],
+  "timestamp": "2026-05-26T13:35:00Z"
+}

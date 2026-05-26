@@ -21,7 +21,8 @@ contract AdaptiveFeeHookV4 is BaseHook {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
-    address public immutable owner;
+    address public owner;
+    address public pendingOwner;
 
     mapping(PoolId poolId => AdaptiveFeeMathV4.Config config) private _configs;
     mapping(PoolId poolId => int24 tick) public referenceTick;
@@ -39,8 +40,11 @@ contract AdaptiveFeeHookV4 is BaseHook {
         uint24 volatilityScore,
         uint16 imbalanceScoreBps
     );
+    event OwnerTransferStarted(address indexed from, address indexed to);
+    event OwnerTransferred(address indexed from, address indexed to);
 
     error NotOwner();
+    error NotPendingOwner();
     error PoolNotConfigured();
 
     modifier onlyOwner() {
@@ -54,6 +58,33 @@ contract AdaptiveFeeHookV4 is BaseHook {
     ///                 CREATE2 proxy and msg.sender during construction is the proxy.
     constructor(IPoolManager _manager, address _owner) BaseHook(_manager) {
         owner = _owner;
+        emit OwnerTransferred(address(0), _owner);
+    }
+
+    /// @notice Begin a two-step ownership handover. The new owner must call
+    ///         acceptOwner() from the target address before the change takes effect.
+    /// @dev Two-step on purpose: a typo in `newOwner` is recoverable here (just
+    ///      transferOwner again) but would permanently brick the hook under a
+    ///      one-step transfer.
+    function transferOwner(address newOwner) external onlyOwner {
+        pendingOwner = newOwner;
+        emit OwnerTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Complete a handover started by transferOwner. Must be called by the
+    ///         exact address passed as `newOwner`.
+    function acceptOwner() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        address previous = owner;
+        owner = pendingOwner;
+        delete pendingOwner;
+        emit OwnerTransferred(previous, msg.sender);
+    }
+
+    /// @notice Cancel a pending handover before it is accepted.
+    function cancelOwnerTransfer() external onlyOwner {
+        delete pendingOwner;
+        emit OwnerTransferStarted(owner, address(0));
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {

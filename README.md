@@ -170,6 +170,45 @@ How to read it:
 
 This is the full evidence trail for the four reason-flag branches the hook can take. All five events were emitted by the deployed `AdaptiveFeeHookV4` contract at `0x7dc7…D080` and are decodable from the linked tx receipts on X Layer testnet.
 
+## v2 deployment — `transferOwner` / `acceptOwner` migration
+
+The v1 deployment above used a wallet whose private key had been published to a shared chat log — i.e. effectively compromised. Rather than abandon it, we used the opportunity to demonstrate the two-step ownership-handover API end-to-end on chain. The v2 stack is a fresh deployment whose hook ownership was migrated from the compromised wallet to a clean wallet that never controlled the deploy.
+
+Full report in [`deployments/xlayer-testnet-v2.json`](deployments/xlayer-testnet-v2.json).
+
+| Contract | Address |
+|---|---|
+| **AdaptiveFeeHookV4 (v2)** | [`0x6cdc6cB5F363f76a748891A41e0fF00C43A45080`](https://www.oklink.com/xlayer-test/address/0x6cdc6cB5F363f76a748891A41e0fF00C43A45080) |
+| PoolManager (v2) | [`0x215bd1b87726F1a238A41c2eB7e1D7907F02A1FF`](https://www.oklink.com/xlayer-test/address/0x215bd1b87726F1a238A41c2eB7e1D7907F02A1FF) |
+| Create2Deployer (v2) | [`0x73B6E9b6F458F94A81384C49d2c7898b2C6b0d6a`](https://www.oklink.com/xlayer-test/address/0x73B6E9b6F458F94A81384C49d2c7898b2C6b0d6a) |
+| PoolSwapTest (v2) | [`0x4313985923df86985CefB7A259be5A85a3578706`](https://www.oklink.com/xlayer-test/address/0x4313985923df86985CefB7A259be5A85a3578706) |
+| PoolModifyLiquidityTest (v2) | [`0x3Fcb9bdf9A396560AF1C1d430306D874276E1aF6`](https://www.oklink.com/xlayer-test/address/0x3Fcb9bdf9A396560AF1C1d430306D874276E1aF6) |
+
+**Ownership migration timeline (all on chain):**
+
+| Step | tx hash | What it proves |
+|---|---|---|
+| Deployer funds new wallet with 0.02 OKB so it can pay `acceptOwner` gas | [`0xd51c5bfb…`](https://www.oklink.com/xlayer-test/tx/0xd51c5bfbcc4612348b2978442866a5cdc04771cd94ab43fdc0bc6b18963303e9) | New wallet has no prior history; gas comes from old wallet |
+| **`transferOwner(newOwner)`** called by the original deployer | [`0x5dd197e0…`](https://www.oklink.com/xlayer-test/tx/0x5dd197e0e7eba26ea15b1b36bb05376537d89a5cdce8d66c5708ffa61a5a02b7) | `OwnerTransferStarted` event emitted; `pendingOwner` set, `owner` *unchanged* (still old wallet) |
+| **`acceptOwner()`** called by the new wallet itself | [`0xfcc36875…`](https://www.oklink.com/xlayer-test/tx/0xfcc368759c547af104b7d8a7c42632936a40da73de7e78301100ee1d2760e769) | `OwnerTransferred` event emitted; `owner` now points to the new wallet; `pendingOwner` cleared |
+
+**Post-migration on-chain reads** (verify directly with `cast call` or any RPC client):
+
+```
+hook.owner()        → 0xFf94b02BEDB61aEe1BAf90586085CDF55e59b2bE   (new wallet)
+hook.pendingOwner() → 0x0000000000000000000000000000000000000000   (cleared)
+```
+
+After the handover the original deployer can no longer call `configurePool`, `resetReferenceTick`, or `transferOwner` — the compromised key is now powerless against this hook. This is the production migration story `transferOwner` was designed to enable.
+
+The v2 stack also ran the same three smoke swaps as v1 (`calm` / `volatile` / `imbalance`) and produced byte-identical `FeeDecisionRecorded` outputs, confirming the fee math is deterministic across deployments:
+
+```
+calm       feeBps= 3000   regime=calm      volScore=  0  imbScore=    0   flags=[]
+volatile   feeBps= 3000   regime=calm      volScore=  1  imbScore=  100   flags=[]
+imbalance  feeBps=12966   regime=volatile  volScore=199  imbScore=   50   flags=[VOL]
+```
+
 ## Security & trust model
 
 - `configurePool` and `resetReferenceTick` on `AdaptiveFeeHookV4` are `onlyOwner` (set explicitly via constructor parameter, so the wallet that triggered the CREATE2 deploy ends up as owner — not the CREATE2 proxy). The MVP tree adds `onlyPoolAdmin` for per-pool config delegation and `onlyPoolManager` to gate the swap callback. External callers cannot push the hook into cooldown or rewrite the fee curve.
