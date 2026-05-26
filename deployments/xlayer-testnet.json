@@ -1,0 +1,77 @@
+{
+  "chain": {
+    "label": "xlayer-testnet",
+    "chainId": 1952
+  },
+  "deployer": "0x1BCd3a5169545b18a676A5EcA841C5d1db3b0020",
+  "contracts": {
+    "create2Deployer": "0xfca6D4417C01572942697CB74D5E7aD68F6da054",
+    "poolManager": "0xA6be15bA3f5C6f2D27FBB672f9A5231F735be969",
+    "tokenA": "0x8F3e5A0a018c255A0400d088863A281fdc1cbE03",
+    "tokenB": "0x5211769A43D40864de6995A29076e56B26e84AeA",
+    "currency0": "0x5211769A43D40864de6995A29076e56B26e84AeA",
+    "currency1": "0x8F3e5A0a018c255A0400d088863A281fdc1cbE03",
+    "swapRouter": "0xF753F9777f55b42e93bffFCc2BBE003843b64e36",
+    "liquidityRouter": "0x1A93362885D4a796d85bB2C8EBAcE348f2534CDA",
+    "adaptiveFeeHookV4": "0x7dc7134D7D8E04A241b12CDe10680b76108fD080"
+  },
+  "poolKey": {
+    "currency0": "0x5211769A43D40864de6995A29076e56B26e84AeA",
+    "currency1": "0x8F3e5A0a018c255A0400d088863A281fdc1cbE03",
+    "fee": "0x800000",
+    "tickSpacing": 60,
+    "hooks": "0x7dc7134D7D8E04A241b12CDe10680b76108fD080"
+  },
+  "poolConfig": {
+    "baseFeeBps": 3000,
+    "minFeeBps": 500,
+    "maxFeeBps": 30000,
+    "volatilityThresholdTicks": 50,
+    "volatilitySurchargeBaseBps": 5000,
+    "volatilitySurchargeSlopeBps": 100,
+    "volatilitySurchargeScale": 3,
+    "imbalanceThresholdBps": 1500,
+    "imbalanceSurchargeBps": 5000,
+    "imbalanceMinAmount": 1000,
+    "cooldownTriggerMultiplier": 4,
+    "cooldownBlocks": 5,
+    "cooldownSurchargeBps": 2500
+  },
+  "miner": {
+    "salt": "0x000000000000000000000000000000000000000000000000000000000000251a",
+    "attempts": 9499
+  },
+  "txs": [
+    {
+      "label": "calm",
+      "hash": "0x8706881112dd4d7cc021d2ad3200245215bd1b57749cb0384b9ee5974ed44439"
+    },
+    {
+      "label": "volatile",
+      "hash": "0x74689917f3f11eee106094323411095cbdcc39758b9da5a7190fab7565bcf3bd"
+    },
+    {
+      "label": "imbalance",
+      "hash": "0xb5c7a25764b60c94baf04359fa2348173be50c7afa8a6b99b7a01da0e8f93ef3"
+    }
+  ],
+  "timestamp": "2026-05-26T13:02:42.303Z",
+  "extraTxs": [
+    {
+      "label": "cooldown:pre",
+      "hash": "0x9714e9cb3446cbda1e651925ec460c82aa678adf0868bd9389a806c807428039"
+    },
+    {
+      "label": "cooldown",
+      "hash": "0x490a17fa6ac075f933546776dacbe58cd949842750d9824d9b064dd29f79d8d1"
+    },
+    {
+      "label": "imbalance:resetRef",
+      "hash": "0x91e041b8030786dfe5aee95abed51aa9a7e720520435a8aff738bbe8c1d79662"
+    },
+    {
+      "label": "imbalance",
+      "hash": "0x0856f2dad64b223fb63d99061690bc72968a56f270b792a43eefd9777a46735e"
+    }
+  ]
+}

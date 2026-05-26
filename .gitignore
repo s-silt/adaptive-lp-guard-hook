@@ -3,5 +3,8 @@ coverage/
 dist/
 artifacts/
 cache/
+build/
 .env
 .DS_Store
+.claude/
+

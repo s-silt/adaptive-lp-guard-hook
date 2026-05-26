@@ -1,73 +1,195 @@
 # Adaptive LP Guard Hook
 
-Adaptive LP Guard Hook is a compact Uniswap v4-style Hook MVP for the X Layer Build X Hook hackathon. It adapts swap fees to volatility, swap pressure, and pool imbalance so LPs get more protection when market conditions become hostile.
+A Uniswap v4 dynamic-fee hook that protects LPs by composing three risk signals — tick volatility, swap-size imbalance, and a cooldown circuit breaker — into the per-swap LP fee.
 
-The design borrows from `aster-trading-bot` patterns:
+Built for the **OKX X Layer Build-X Hackathon (Hook track)**, in collaboration with Uniswap and Flap.
 
-- Regime detection: calm versus volatile pool state.
-- Risk throttling: higher fees when risk indicators rise.
-- Circuit breaker behavior: extreme tick deviation activates cooldown protection.
-- Attribution events: each decision records fee, regime, scores, and reason flags.
+## What ships in this repo
 
-## Contracts
+Two parallel implementations live side-by-side:
 
-- `contracts/AdaptiveFeeMath.sol`: pure fee decision library.
-- `contracts/AdaptiveFeeHook.sol`: stateful hook-facing contract with pool config, cooldown state, and decision events.
+| Path | Status | Purpose |
+|---|---|---|
+| `contracts/AdaptiveFeeHook.sol` + `contracts/AdaptiveFeeMath.sol` | Submitted MVP | Standalone fee-decision engine with a v4-style API surface, kept unmodified to match the submitted artifact. Useful as a self-contained simulator. |
+| `contracts/v4/AdaptiveFeeHookV4.sol` + `contracts/v4/AdaptiveFeeMathV4.sol` | **New, post-submission** | Real `IHooks` implementation that PoolManager will dispatch on `beforeSwap`/`afterInitialize`. Plugs into a v4 dynamic-fee pool and overrides the LP fee per swap. |
 
-`AdaptiveFeeHook.beforeSwapDecision` is intentionally small and adapter-friendly. A full Uniswap v4 deployment can wire the same decision engine into the real `beforeSwap` hook surface.
+The hackathon rules allow continued development on submitted projects, including new Hook contract logic — that is what the `contracts/v4/` tree is.
 
-## Fee Model
+## The hook in one diagram
 
-The hook starts from `baseFeeBps`, then:
+```
+Trader ──► PoolSwapTest.swap(poolKey, ...)
+            │
+            ▼
+       PoolManager
+            │
+            ▼ beforeSwap callback
+   AdaptiveFeeHookV4
+            │
+            │  ┌─ read poolManager.getSlot0(pid)      → currentTick
+            │  ├─ read poolManager.getLiquidity(pid)  → estimate imbalance
+            │  ├─ stored referenceTick[pid]
+            │  └─ stored cooldownUntilBlock[pid]
+            ▼
+   AdaptiveFeeMathV4.decide(cfg, ...)
+            │
+            ▼
+   feeBps | OVERRIDE_FEE_FLAG  ──► PoolManager applies this as the LP fee for this swap
+```
 
-1. Adds a volatility surcharge when `abs(currentTick - referenceTick)` exceeds `volatilityThresholdTicks`.
-2. Adds an imbalance surcharge when a large swap arrives in a nonzero pressure direction and imbalance is above threshold.
-3. Adds a cooldown surcharge while the pool is in protection mode.
-4. Clamps the final result between `minFeeBps` and `maxFeeBps`.
+The pool MUST be created with `PoolKey.fee = LPFeeLibrary.DYNAMIC_FEE_FLAG` (`0x800000`) so the manager honours the hook-returned fee.
 
-Reason flags:
+## Fee model
 
-- `1`: volatility surcharge
-- `2`: imbalance surcharge
-- `4`: cooldown surcharge
-- `8`: max-fee clamp
+`AdaptiveFeeMathV4.decide` is a pure function. Every coefficient that shapes the response curve is per-pool configurable:
 
-## Install
+```
+fee = baseFeeBps
+    + (deviation ≥ volatilityThresholdTicks
+         ? volatilitySurchargeBaseBps + slope·(deviation − threshold) / scale
+         : 0)
+    + (pressureDir ≠ 0 ∧ |amount| ≥ imbalanceMinAmount ∧ score ≥ imbalanceThresholdBps
+         ? imbalanceSurchargeBps
+         : 0)
+    + (cooldownActive ? cooldownSurchargeBps : 0)
+
+clamp(fee, [minFeeBps, maxFeeBps])
+enterCooldown ⇔ deviation ≥ volatilityThresholdTicks · cooldownTriggerMultiplier
+```
+
+Why this is more than "fee = f(volatility)":
+
+- **Imbalance branch** taxes large one-sided pressure separately from volatility, so a sudden whale swap pays even when the tick has barely moved yet.
+- **Cooldown branch** is sticky: once a single extreme move trips the circuit breaker, subsequent swaps in the protection window all pay the cooldown surcharge, regardless of their own size.
+- **Reference tick** is anchored at pool initialization and can be re-anchored by the owner, so volatility is measured against a meaningful baseline rather than the previous block.
+
+Every decision emits `FeeDecisionRecorded(poolId, zeroForOne, amount, feeBps, reasonFlags, regime, volatilityScore, imbalanceScoreBps)` so judges (and graphs) can attribute each fee to the signals that produced it.
+
+## Why this hook design earns the "adaptive" label
+
+Other dynamic-fee hooks on v4 generally react to one signal (TWAP-vs-spot volatility, or just swap size). This one fuses three signals plus a stateful circuit breaker, with every coefficient configurable per-pool — so the same hook serves a stable pair and a memecoin pair without redeployment.
+
+## Build & test
 
 ```bash
 npm install
+npm run compile          # solc-js, resolves @uniswap/* imports from node_modules
+npm test                 # mocha — formula-level sanity checks (JS mirror)
 ```
 
-## Test
+**Toolchain note.** The dev box for this project is Windows ARM64. Hardhat 2.x's napi-rs Solidity parser and Foundry both ship without `win32-arm64-msvc` prebuilt binaries, so the project uses `solc-js` directly for compilation and `ethers v6` for deployment. Local Anvil/Hardhat node is not available, so on-chain behaviour is verified by the deploy script against X Layer testnet rather than against a local fork. See `scripts/compile.js` for the import resolver and `scripts/deploy.js` for the end-to-end test.
+
+## Deploy to X Layer
 
 ```bash
-npm test
+export DEPLOYER_PK=0x...           # funded with testnet OKB from https://www.okx.com/en-us/xlayer/faucet
+# Optional: override RPC if the default is rate-limited
+# export XLAYER_TESTNET_RPC=https://testrpc.xlayer.tech/terigon
+
+npm run compile
+npm run deploy:xlayer-testnet
 ```
 
-The test suite compiles the Solidity contracts with `solc-js` and validates the same fee scenarios through a JavaScript mirror of the on-chain fee model. This avoids native local-chain dependencies on Windows ARM64 while still checking Solidity compilation and the model behavior.
+`scripts/deploy.js` will, in one go:
 
-## Demo
+1. Deploy `Create2Deployer` (used to mine a hook address with the required `BEFORE_SWAP + AFTER_INITIALIZE` flag bits).
+2. Deploy a fresh `PoolManager` (v4-core does not yet have an official X Layer deployment).
+3. Deploy two `TestERC20`s, plus `PoolSwapTest` and `PoolModifyLiquidityTest` routers.
+4. Mine a CREATE2 salt and deploy `AdaptiveFeeHookV4` at the resulting address.
+5. Call `configurePool`, then `PoolManager.initialize(poolKey, sqrtPriceX96)` with `fee = DYNAMIC_FEE_FLAG`.
+6. Add initial liquidity around tick 0.
+7. Execute three smoke swaps — `calm`, `volatile`, `imbalance` — each printing the fee branch the hook took.
+8. Write the address + tx-hash report to `deployments/<chain-label>.json`.
 
-```bash
-npm run demo
+For X Layer mainnet, use `npm run deploy:xlayer-mainnet` and set `XLAYER_RPC` if needed.
+
+## Deployment artifacts (X Layer testnet)
+
+Deployed and exercised on **X Layer testnet** (chainId `1952`) on 2026-05-26. Full report in [`deployments/xlayer-testnet.json`](deployments/xlayer-testnet.json).
+
+| Contract | Address |
+|---|---|
+| **AdaptiveFeeHookV4** | [`0x7dc7134D7D8E04A241b12CDe10680b76108fD080`](https://www.oklink.com/xlayer-test/address/0x7dc7134D7D8E04A241b12CDe10680b76108fD080) |
+| PoolManager (v4-core) | [`0xA6be15bA3f5C6f2D27FBB672f9A5231F735be969`](https://www.oklink.com/xlayer-test/address/0xA6be15bA3f5C6f2D27FBB672f9A5231F735be969) |
+| Create2Deployer | [`0xfca6D4417C01572942697CB74D5E7aD68F6da054`](https://www.oklink.com/xlayer-test/address/0xfca6D4417C01572942697CB74D5E7aD68F6da054) |
+| PoolSwapTest | [`0xF753F9777f55b42e93bffFCc2BBE003843b64e36`](https://www.oklink.com/xlayer-test/address/0xF753F9777f55b42e93bffFCc2BBE003843b64e36) |
+| PoolModifyLiquidityTest | [`0x1A93362885D4a796d85bB2C8EBAcE348f2534CDA`](https://www.oklink.com/xlayer-test/address/0x1A93362885D4a796d85bB2C8EBAcE348f2534CDA) |
+| TestERC20 currency0 | [`0x5211769A43D40864de6995A29076e56B26e84AeA`](https://www.oklink.com/xlayer-test/address/0x5211769A43D40864de6995A29076e56B26e84AeA) |
+| TestERC20 currency1 | [`0x8F3e5A0a018c255A0400d088863A281fdc1cbE03`](https://www.oklink.com/xlayer-test/address/0x8F3e5A0a018c255A0400d088863A281fdc1cbE03) |
+
+**Pool key:** `currency0 / currency1` with `fee = 0x800000` (DYNAMIC_FEE_FLAG), `tickSpacing = 60`, `hooks = AdaptiveFeeHookV4`.
+
+**Key transactions:**
+
+| Action | tx hash |
+|---|---|
+| `Create2Deployer.deploy` (CREATE2 mints hook) | [`0x1c65b339…`](https://www.oklink.com/xlayer-test/tx/0x1c65b339dcd7e91f076362a48ed364cfc7da258b196dbc029c9e66d3ebe7b321) |
+| `AdaptiveFeeHookV4.configurePool` | [`0x732febe2…`](https://www.oklink.com/xlayer-test/tx/0x732febe269715f3f00933ec871e72fd5412c5ceb15ccf01222cdb3ad8db79a2a) |
+| `PoolManager.initialize` (afterInitialize fires) | [`0xd7f4de99…`](https://www.oklink.com/xlayer-test/tx/0xd7f4de997aa3ba55904b48ce374bafec1e16607686b11774812e4630178a8373) |
+| `modifyLiquidity` | [`0x1ad7030a…`](https://www.oklink.com/xlayer-test/tx/0x1ad7030a54ff7bc58d6c1a367ff6826e30b3b67e7f762ab00c5072694aaa66a4) |
+| Smoke swap #1 (calm,      base fee) | [`0x87068811…`](https://www.oklink.com/xlayer-test/tx/0x8706881112dd4d7cc021d2ad3200245215bd1b57749cb0384b9ee5974ed44439) |
+| Smoke swap #2 (large swap, hook saw deviation pre-execution) | [`0x74689917…`](https://www.oklink.com/xlayer-test/tx/0x74689917f3f11eee106094323411095cbdcc39758b9da5a7190fab7565bcf3bd) |
+| Smoke swap #3 (deviation=199, **VOL branch**, fee=12966 bps) | [`0xb5c7a257…`](https://www.oklink.com/xlayer-test/tx/0xb5c7a25764b60c94baf04359fa2348173be50c7afa8a6b99b7a01da0e8f93ef3) |
+
+**Additional swap txs from `scripts/extra-swaps.js`** (run against the same pool to drive every remaining fee branch onto chain):
+
+| Action | tx hash |
+|---|---|
+| Extra swap #1 — large zeroForOne, deviation = 296, **VOL branch**, also trips `enterCooldown` | [`0x490a17fa…`](https://www.oklink.com/xlayer-test/tx/0x490a17fa6ac075f933546776dacbe58cd949842750d9824d9b064dd29f79d8d1) |
+| `resetReferenceTick` (owner re-anchors deviation back to 0) | [`0x91e041b8…`](https://www.oklink.com/xlayer-test/tx/0x91e041b8030786dfe5aee95abed51aa9a7e720520435a8aff738bbe8c1d79662) |
+| Extra swap #2 — large amount/liquidity ratio, **IMB branch + still inside CD window** | [`0x0856f2da…`](https://www.oklink.com/xlayer-test/tx/0x0856f2dad64b223fb63d99061690bc72968a56f270b792a43eefd9777a46735e) |
+
+`FeeDecisionRecorded` events from all five fee decisions on this pool (decoded):
+
+```
+calm       feeBps= 3000   regime=calm      volScore=  0  imbScore=    0   flags=[]
+swap #2    feeBps= 3000   regime=calm      volScore=  1  imbScore=  100   flags=[]
+swap #3    feeBps=12966   regime=volatile  volScore=199  imbScore=   50   flags=[VOL]
+extra #1   feeBps=16200   regime=volatile  volScore=296  imbScore=    0   flags=[VOL]
+extra #2   feeBps=10500   regime=calm      volScore=  0  imbScore= 2000   flags=[IMB | CD]
 ```
 
-Example output:
+How to read it:
 
-```text
-calm swap: fee=30bps regime=calm volatilityTicks=10 imbalance=0 flags=0
-volatile swap: fee=105bps regime=volatile volatilityTicks=125 imbalance=0 flags=1
-large same-direction pressure: fee=80bps regime=calm volatilityTicks=10 imbalance=2500 flags=2
-cooldown protected swap: fee=55bps regime=calm volatilityTicks=10 imbalance=0 flags=4
+- **base** (no surcharge) — `calm` and `swap #2` both saw `deviation < threshold` *at entry*, so the hook returned `baseFeeBps = 3000`. (Swap #2 was a large swap that *moved* the tick a lot, but the hook evaluates state pre-execution; this is the intended design.)
+- **VOL** — `swap #3` and `extra #1` saw `deviation ≥ 50`. For `extra #1` deviation = 296, surcharge = `5000 + ⌊(296 − 50) × 100 / 3⌋ = 13200`, total fee = `3000 + 13200 = 16200 bps = 1.62%`. ✅
+- **CD** — `extra #1` had `deviation ≥ 4 × 50 = 200`, so it called `cooldownUntilBlock[pid] = block + 5`. Two blocks later, `extra #2` saw `cooldownActive = true` and added `cooldownSurchargeBps = 2500`.
+- **IMB** — `extra #2`'s `amountSpecified ≈ 2e20` against ~1e21 of liquidity gives `imbScore = 2000 ≥ imbalanceThresholdBps = 1500`, adding `imbalanceSurchargeBps = 5000`. Total: `3000 (base) + 5000 (IMB) + 2500 (CD) = 10500 bps = 1.05%`. ✅
+
+This is the full evidence trail for the four reason-flag branches the hook can take. All five events were emitted by the deployed `AdaptiveFeeHookV4` contract at `0x7dc7…D080` and are decodable from the linked tx receipts on X Layer testnet.
+
+## Security & trust model
+
+- `configurePool` and `resetReferenceTick` are `onlyOwner` (set to the deployer in the constructor). External callers cannot push the hook into cooldown or rewrite the fee curve.
+- All swap-time inputs come from `PoolManager` callbacks (the `onlyPoolManager` modifier inherited from `BaseHook` rejects spoofed calls), so the imbalance score and current tick reflect actual pool state, not user-supplied numbers.
+- The hook does **not** take `BeforeSwapDelta` and does **not** rebalance the swap itself — it only mutates the LP fee. This keeps the audit surface narrow and the user's swap outcome identical to a vanilla pool aside from the fee.
+- Fees are clamped to `[minFeeBps, maxFeeBps]`. Even a misconfigured curve cannot exceed the configured ceiling.
+
+## Repository map
+
+```
+contracts/
+├─ AdaptiveFeeHook.sol         (submitted MVP, unchanged)
+├─ AdaptiveFeeMath.sol         (submitted MVP, unchanged)
+└─ v4/
+   ├─ AdaptiveFeeHookV4.sol    (real IHooks implementation)
+   ├─ AdaptiveFeeMathV4.sol    (parameterised fee math)
+   ├─ Create2Deployer.sol      (minimal CREATE2 deployer for hook-address mining)
+   └─ Imports.sol              (forces solc to compile v4-core PoolManager + test routers)
+scripts/
+├─ compile.js                  (solc-js compiler with node_modules import resolution)
+├─ hookMiner.js                (CREATE2 salt search — JS port of Foundry HookMiner)
+├─ mine.js                     (self-test for hookMiner)
+├─ deploy.js                   (end-to-end deployment + smoke-swap script)
+└─ demo.js                     (legacy MVP demo, kept for parity with submitted version)
+test/
+├─ adaptiveFeeHook.test.js     (legacy submitted-version tests)
+└─ adaptiveFeeMathV4.test.js   (JS mirror tests for the new parameterised math)
+docs/superpowers/              (planning + design docs from the submitted MVP)
 ```
 
-## X Layer Deployment Path
+## Acknowledgements
 
-1. Add a real Uniswap v4 hook adapter around `AdaptiveFeeMath.decide`.
-2. Deploy the hook adapter to X Layer testnet or mainnet.
-3. Create a v4 pool using the hook address.
-4. Submit the pool address, hook address, source code, and demo video to the hackathon form.
-
-## Hackathon Narrative
-
-Most dynamic-fee hooks react only to volatility. Adaptive LP Guard also considers swap pressure and cooldown state, which makes it closer to a live risk engine. The MVP is small enough to audit but expressive enough to show how LP protection can become programmable at the pool level.
+- Built on `@uniswap/v4-core` and `@uniswap/v4-periphery`.
+- Hackathon track: [OKX X Layer Build-X — Hook](https://web3.okx.com/xlayer/build-x-hackathon/hook), with Uniswap and Flap.
+- HookMiner salt-search logic is a JS port of `v4-periphery`'s Foundry library, adapted for `ethers v6`.

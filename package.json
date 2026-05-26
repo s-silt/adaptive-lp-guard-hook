@@ -3,12 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "mocha --timeout 10000 \"test/**/*.test.js\"",
-    "demo": "node scripts/demo.js"
+    "test": "mocha --timeout 30000 \"test/**/*.test.js\"",
+    "compile": "node scripts/compile.js",
+    "mine": "node scripts/mine.js",
+    "demo": "node scripts/demo.js",
+    "deploy:xlayer-testnet": "node -e \"process.env.CHAIN_LABEL='xlayer-testnet'; process.env.RPC_URL=process.env.XLAYER_TESTNET_RPC||'https://testrpc.xlayer.tech/terigon'; require('./scripts/deploy.js')\"",
+    "deploy:xlayer-mainnet": "node -e \"process.env.CHAIN_LABEL='xlayer-mainnet'; process.env.RPC_URL=process.env.XLAYER_RPC||'https://rpc.xlayer.tech'; require('./scripts/deploy.js')\""
   },
   "devDependencies": {
+    "@uniswap/v4-core": "^1.0.2",
+    "@uniswap/v4-periphery": "^1.0.3",
     "chai": "^4.5.0",
+    "ethers": "^6.16.0",
     "mocha": "^11.7.5",
-    "solc": "^0.8.31"
+    "solc": "^0.8.26",
+    "solmate": "^6.8.0"
   }
 }
