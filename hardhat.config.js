@@ -30,6 +30,7 @@ module.exports = {
     version: SOLC_VERSION,
     settings: {
       viaIR: true,
+      evmVersion: "cancun",
       optimizer: { enabled: true, runs: 200 },
     },
   },
