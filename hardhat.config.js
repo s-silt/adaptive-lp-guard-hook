@@ -7,8 +7,8 @@ const {
 require("@nomicfoundation/hardhat-ethers");
 require("@nomicfoundation/hardhat-chai-matchers");
 
-const SOLC_VERSION = "0.8.24";
-const SOLC_LONG_VERSION = "0.8.24+commit.e11b9ed9";
+const SOLC_VERSION = "0.8.26";
+const SOLC_LONG_VERSION = "0.8.26+commit.8a97fa7a";
 
 // The sandbox blocks binaries.soliditylang.org, so the standard Hardhat
 // compiler downloader fails. Point Hardhat at the soljson bundled with the
