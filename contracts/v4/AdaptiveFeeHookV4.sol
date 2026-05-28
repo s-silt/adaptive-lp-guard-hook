@@ -9,6 +9,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {AdaptiveFeeMathV4} from "./AdaptiveFeeMathV4.sol";
@@ -31,6 +32,7 @@ contract AdaptiveFeeHookV4 is BaseHook {
 
     event PoolConfigured(PoolId indexed poolId, AdaptiveFeeMathV4.Config config);
     event ReferenceTickReset(PoolId indexed poolId, int24 tick);
+    event ReferenceTickEmaUpdated(PoolId indexed poolId, int24 oldTick, int24 newTick, bool cooldownActive);
     event FeeDecisionRecorded(
         PoolId indexed poolId,
         bool zeroForOne,
@@ -114,7 +116,7 @@ contract AdaptiveFeeHookV4 is BaseHook {
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: false,
+            afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
@@ -209,6 +211,37 @@ contract AdaptiveFeeHookV4 is BaseHook {
         // OR the override flag so PoolManager applies our per-swap fee instead of the stored fee.
         uint24 overrideFee = decision.feeBps | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, overrideFee);
+    }
+
+    /// @notice Smooth the stored reference tick toward the post-swap price.
+    /// @dev    Runs after every swap. The actual EMA policy (weights, calm vs. cooldown)
+    ///         lives in `AdaptiveFeeMathV4.updateAnchor`. Paused pools skip the update —
+    ///         the adaptive layer is off, so the anchor should not move either.
+    function _afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
+        internal
+        override
+        returns (bytes4, int128)
+    {
+        if (paused) return (BaseHook.afterSwap.selector, int128(0));
+
+        PoolId pid = key.toId();
+        AdaptiveFeeMathV4.Config memory config = _configs[pid];
+        if (config.maxFeeBps == 0) {
+            // Pool was never configured — defensive no-op rather than revert (afterSwap
+            // reverts would unwind the user's swap, an unacceptable side-effect).
+            return (BaseHook.afterSwap.selector, int128(0));
+        }
+
+        (, int24 currentTick,,) = poolManager.getSlot0(pid);
+        int24 oldRef = referenceTick[pid];
+        bool cdActive = block.number <= cooldownUntilBlock[pid];
+        int24 newRef = AdaptiveFeeMathV4.updateAnchor(config, oldRef, currentTick, cdActive);
+
+        if (newRef != oldRef) {
+            referenceTick[pid] = newRef;
+            emit ReferenceTickEmaUpdated(pid, oldRef, newRef, cdActive);
+        }
+        return (BaseHook.afterSwap.selector, int128(0));
     }
 
     /// @dev Imbalance is approximated as |amount| relative to active liquidity, in bps, capped at 10_000.

@@ -33,6 +33,15 @@ library AdaptiveFeeMathV4 {
         uint16 cooldownTriggerMultiplier;
         uint32 cooldownBlocks;
         uint24 cooldownSurchargeBps;
+        // Reference-tick EMA: weights applied to `currentTick` when smoothing the
+        // stored anchor after a swap. Each is in bps (0..10_000).
+        //   0     → anchor stays frozen (legacy v1/v2 behaviour, owner must re-anchor manually)
+        //   10000 → anchor snaps to currentTick on every swap (no protection)
+        // Two weights so the policy can be **regime-adaptive**: typically users want a
+        // bigger weight when the pool is calm (anchor should track baseline drift) and
+        // a smaller weight while a cooldown is active (don't let a whale poison the anchor).
+        uint16 referenceTickEmaWeightCalmBps;
+        uint16 referenceTickEmaWeightVolatileBps;
     }
 
     struct Decision {
@@ -106,6 +115,69 @@ library AdaptiveFeeMathV4 {
         require(config.volatilitySurchargeScale > 0, "zero volatility scale");
         require(config.imbalanceThresholdBps <= 10_000, "bad imbalance threshold");
         require(config.cooldownTriggerMultiplier > 0, "zero cooldown multiplier");
+        require(config.referenceTickEmaWeightCalmBps <= 10_000, "bad ema calm");
+        require(config.referenceTickEmaWeightVolatileBps <= 10_000, "bad ema vol");
+        // Sanity: volatile weight should never exceed calm weight. A pool that
+        // updates its anchor *faster* during volatility makes no protection sense.
+        require(
+            config.referenceTickEmaWeightVolatileBps <= config.referenceTickEmaWeightCalmBps,
+            "ema vol > ema calm"
+        );
+    }
+
+    /// @notice Compute the new reference tick after a swap, smoothing the stored
+    ///         anchor toward `currentTick` using an EMA whose weight depends on
+    ///         whether the pool is currently in a cooldown window.
+    ///
+    /// @dev    This is intentionally separated from `decide()` so the hook can
+    ///         call it from `_afterSwap` with the **post-swap** tick. That way
+    ///         the anchor follows the realised price, not the predicted one.
+    ///
+    /// @dev    Design space the caller is choosing between via the two weights:
+    ///         - Set both weights = 0   → anchor freezes (v1/v2 behaviour)
+    ///         - Set both weights = N   → uniform EMA, drifts under whales
+    ///         - calm > 0, volatile = 0 → strict: anchor only updates between events
+    ///         - calm > volatile > 0    → smooth: anchor still tracks during stress, just slower
+    ///         Whatever the policy, the formula MUST produce a tick `newRef` such that:
+    ///           min(referenceTick, currentTick) <= newRef <= max(referenceTick, currentTick)
+    ///         i.e. EMA never overshoots — see `_clampBetween` below.
+    function updateAnchor(
+        Config memory config,
+        int24 referenceTick,
+        int24 currentTick,
+        bool cooldownActive
+    ) internal pure returns (int24 newReferenceTick) {
+        uint16 weightBps = cooldownActive
+            ? config.referenceTickEmaWeightVolatileBps
+            : config.referenceTickEmaWeightCalmBps;
+
+        if (weightBps == 0 || referenceTick == currentTick) {
+            return referenceTick;
+        }
+        if (weightBps == 10_000) {
+            return currentTick;
+        }
+
+        // Policy: "Option A" — anchor always drifts toward currentTick by at least 1 tick
+        // when they differ. Truncation-to-zero would leave the anchor permanently stuck
+        // under small weights (e.g. weightBps=500, diff=10 → step=0). Forcing ±1 in that
+        // case means even a 1% weight tracks slow drift one tick at a time.
+        int256 diff = int256(currentTick) - int256(referenceTick);
+        int256 step = (diff * int256(uint256(weightBps))) / int256(10_000);
+        if (step == 0) {
+            step = diff > 0 ? int256(1) : int256(-1);
+        }
+        int256 proposed = int256(referenceTick) + step;
+        return _clampBetween(referenceTick, currentTick, int24(proposed));
+    }
+
+    /// @dev Guarantees the EMA result stays within [min(a,b), max(a,b)]. Defensive against
+    ///      any caller-side arithmetic bug — anchor must never escape the segment.
+    function _clampBetween(int24 a, int24 b, int24 x) private pure returns (int24) {
+        (int24 lo, int24 hi) = a < b ? (a, b) : (b, a);
+        if (x < lo) return lo;
+        if (x > hi) return hi;
+        return x;
     }
 
     function _absTickDiff(int24 a, int24 b) private pure returns (uint24) {

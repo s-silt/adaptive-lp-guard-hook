@@ -62,7 +62,9 @@ const POOL_CONFIG = {
   imbalanceMinAmount: 1000,
   cooldownTriggerMultiplier: 4,
   cooldownBlocks: 5,
-  cooldownSurchargeBps: 2500           // +25 bps
+  cooldownSurchargeBps: 2500,          // +25 bps
+  referenceTickEmaWeightCalmBps: 2000,    // 20% — anchor tracks calm baseline drift
+  referenceTickEmaWeightVolatileBps: 500  // 5%  — anchor barely moves while pool is hot
 };
 
 const HOOK_PERMS = {
@@ -73,7 +75,7 @@ const HOOK_PERMS = {
   beforeRemoveLiquidity: false,
   afterRemoveLiquidity: false,
   beforeSwap: true,
-  afterSwap: false,
+  afterSwap: true,
   beforeDonate: false,
   afterDonate: false,
   beforeSwapReturnDelta: false,
@@ -178,7 +180,8 @@ async function main() {
     POOL_CONFIG.volatilityThresholdTicks, POOL_CONFIG.volatilitySurchargeBaseBps,
     POOL_CONFIG.volatilitySurchargeSlopeBps, POOL_CONFIG.volatilitySurchargeScale,
     POOL_CONFIG.imbalanceThresholdBps, POOL_CONFIG.imbalanceSurchargeBps, POOL_CONFIG.imbalanceMinAmount,
-    POOL_CONFIG.cooldownTriggerMultiplier, POOL_CONFIG.cooldownBlocks, POOL_CONFIG.cooldownSurchargeBps
+    POOL_CONFIG.cooldownTriggerMultiplier, POOL_CONFIG.cooldownBlocks, POOL_CONFIG.cooldownSurchargeBps,
+    POOL_CONFIG.referenceTickEmaWeightCalmBps, POOL_CONFIG.referenceTickEmaWeightVolatileBps
   ];
   const cfgTx = await hook.configurePool(poolKey, cfgArray);
   await cfgTx.wait();

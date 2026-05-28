@@ -28,7 +28,11 @@ const baseConfig = () => ({
   imbalanceMinAmount: 1000,
   cooldownTriggerMultiplier: 4,
   cooldownBlocks: 5,
-  cooldownSurchargeBps: 2500
+  cooldownSurchargeBps: 2500,
+  // EMA weights default to 0 here so the existing decide() mirror tests are unaffected.
+  // Tests that exercise updateAnchor explicitly set these.
+  referenceTickEmaWeightCalmBps: 0,
+  referenceTickEmaWeightVolatileBps: 0
 });
 
 const FLAG_VOLATILITY = 1;
@@ -67,6 +71,26 @@ function mirrorDecide(cfg, refTick, curTick, amountAbs, imbBps, pressDir, cooldo
     volatilityScore: deviation, imbalanceScoreBps: imbBps,
     enterCooldown: deviation >= cfg.volatilityThresholdTicks * cfg.cooldownTriggerMultiplier
   };
+}
+
+function mirrorUpdateAnchor(cfg, refTick, curTick, cooldownActive) {
+  const weight = cooldownActive
+    ? cfg.referenceTickEmaWeightVolatileBps
+    : cfg.referenceTickEmaWeightCalmBps;
+  if (weight === 0 || refTick === curTick) return refTick;
+  if (weight === 10000) return curTick;
+
+  const diff = curTick - refTick;
+  // Solidity does `(diff * weight) / 10000` with truncated integer division. Math.trunc
+  // mirrors that exactly for both positive and negative `diff`.
+  let step = Math.trunc((diff * weight) / 10000);
+  if (step === 0) step = diff > 0 ? 1 : -1;
+  let proposed = refTick + step;
+  const lo = Math.min(refTick, curTick);
+  const hi = Math.max(refTick, curTick);
+  if (proposed < lo) proposed = lo;
+  if (proposed > hi) proposed = hi;
+  return proposed;
 }
 
 describe("AdaptiveFeeMathV4 (JS mirror, see file header)", function () {
@@ -136,5 +160,54 @@ describe("AdaptiveFeeMathV4 (JS mirror, see file header)", function () {
     // deviation = 60, over = 10, surcharge = 5000 + floor(10*200/1) = 7000
     const d = mirrorDecide(cfg, 1000, 1060, 300, 0, 0, false);
     expect(d.feeBps).to.equal(3000 + 7000);
+  });
+});
+
+describe("AdaptiveFeeMathV4.updateAnchor (JS mirror)", function () {
+  const cfgWithEma = (calmBps, volBps) => ({
+    ...baseConfig(),
+    referenceTickEmaWeightCalmBps: calmBps,
+    referenceTickEmaWeightVolatileBps: volBps
+  });
+
+  it("returns referenceTick unchanged when calm weight is zero", function () {
+    expect(mirrorUpdateAnchor(cfgWithEma(0, 0), 1000, 1100, false)).to.equal(1000);
+  });
+
+  it("returns currentTick when weight is 10000 (snap)", function () {
+    expect(mirrorUpdateAnchor(cfgWithEma(10000, 10000), 1000, 1100, false)).to.equal(1100);
+  });
+
+  it("uses calm weight by default and volatile weight inside cooldown", function () {
+    const cfg = cfgWithEma(2000, 500);  // 20% calm, 5% volatile
+    // diff = 100, calm step = floor(100 * 2000 / 10000) = 20 → newRef = 1020
+    expect(mirrorUpdateAnchor(cfg, 1000, 1100, false)).to.equal(1020);
+    // diff = 100, volatile step = floor(100 * 500 / 10000) = 5 → newRef = 1005
+    expect(mirrorUpdateAnchor(cfg, 1000, 1100, true)).to.equal(1005);
+  });
+
+  it("snaps to ±1 when integer truncation would zero the step (Option A policy)", function () {
+    // diff = 10, weight = 500 (5%): 10 * 500 / 10000 = 0.5 → trunc = 0 → forced +1
+    expect(mirrorUpdateAnchor(cfgWithEma(500, 500), 1000, 1010, false)).to.equal(1001);
+    // diff = -10, weight = 500: trunc = 0 → forced -1
+    expect(mirrorUpdateAnchor(cfgWithEma(500, 500), 1000, 990, false)).to.equal(999);
+  });
+
+  it("works with negative ticks", function () {
+    const cfg = cfgWithEma(2500, 1000);
+    // diff = 100, step = 25 → -100 + 25 = -75
+    expect(mirrorUpdateAnchor(cfg, -100, 0, false)).to.equal(-75);
+    // diff = -200, step = floor(-200 * 2500 / 10000) = -50 → 0 + (-50) = -50
+    expect(mirrorUpdateAnchor(cfg, 0, -200, false)).to.equal(-50);
+  });
+
+  it("never overshoots currentTick", function () {
+    // Even with weight = 9999 the result must stay <= currentTick (rounding can't push past).
+    expect(mirrorUpdateAnchor(cfgWithEma(9999, 9999), 1000, 1001, false)).to.equal(1001);
+    expect(mirrorUpdateAnchor(cfgWithEma(9999, 9999), 1001, 1000, false)).to.equal(1000);
+  });
+
+  it("returns referenceTick if it already equals currentTick", function () {
+    expect(mirrorUpdateAnchor(cfgWithEma(5000, 5000), 500, 500, false)).to.equal(500);
   });
 });
